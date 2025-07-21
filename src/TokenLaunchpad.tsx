@@ -1,33 +1,46 @@
 import { Keypair, SystemProgram, Transaction } from "@solana/web3.js";
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
-import { TOKEN_2022_PROGRAM_ID, getMintLen, createInitializeMetadataPointerInstruction, createInitializeMintInstruction, TYPE_SIZE, LENGTH_SIZE, ExtensionType } from "@solana/spl-token"
-import { createInitializeInstruction, pack } from '@solana/spl-token-metadata';
-
+import {
+    TOKEN_2022_PROGRAM_ID,
+    getMintLen,
+    createInitializeMetadataPointerInstruction,
+    createInitializeMintInstruction,
+    TYPE_SIZE,
+    LENGTH_SIZE,
+    ExtensionType,
+    getAssociatedTokenAddressSync,
+    createAssociatedTokenAccountInstruction,
+    createMintToInstruction,
+} from "@solana/spl-token";
+import {
+    createInitializeInstruction,
+    pack,
+} from '@solana/spl-token-metadata';
 
 export function TokenLaunchpad() {
-    const { connection } = useConnection();//connects with other nodes 
-    const wallet = useWallet();//access to user public key and signing 
+    const { connection } = useConnection();
+    const wallet = useWallet();
 
     async function createToken() {
-        const mintKeypair = Keypair.generate();//mint account generated 
+        if (!wallet.publicKey) {
+            throw new Error('Wallet public key is not available');
+        }
+
+        const mintKeypair = Keypair.generate();
         const metadata = {
             mint: mintKeypair.publicKey,
             name: 'ADITYA',
             symbol: 'ADI   ',
-            uri: 'https://cdn.100xdevs.com/metadata.json',
+            uri: 'https://adityapsingh-dev.github.io/tokenJson/example.json',
             additionalMetadata: [],
         };
 
-        const mintLen = getMintLen([ExtensionType.MetadataPointer]);//length of mint
-        const metadataLen = TYPE_SIZE + LENGTH_SIZE + pack(metadata).length;//metadatalength
+        const mintLen = getMintLen([ExtensionType.MetadataPointer]);
+        const metadataLen = TYPE_SIZE + LENGTH_SIZE + pack(metadata).length;
+        const lamports = await connection.getMinimumBalanceForRentExemption(mintLen + metadataLen);
 
-        const lamports = await connection.getMinimumBalanceForRentExemption(mintLen + metadataLen); //rent exemption 
-if (!wallet.publicKey) {
-  throw new Error('Wallet public key is not available');
-}// if wallet key not found 
-//transaction created 
+        // Create the mint account & metadata
         const transaction = new Transaction().add(
-            //creating account first 
             SystemProgram.createAccount({
                 fromPubkey: wallet.publicKey,
                 newAccountPubkey: mintKeypair.publicKey,
@@ -35,11 +48,19 @@ if (!wallet.publicKey) {
                 lamports,
                 programId: TOKEN_2022_PROGRAM_ID,
             }),
-            //initializing metaData pointer 
-            createInitializeMetadataPointerInstruction(mintKeypair.publicKey, wallet.publicKey, mintKeypair.publicKey, TOKEN_2022_PROGRAM_ID),
-            //initializing mint
-            createInitializeMintInstruction(mintKeypair.publicKey, 9, wallet.publicKey, null, TOKEN_2022_PROGRAM_ID),
-            //add metadata
+            createInitializeMetadataPointerInstruction(
+                mintKeypair.publicKey,
+                wallet.publicKey,
+                mintKeypair.publicKey,
+                TOKEN_2022_PROGRAM_ID
+            ),
+            createInitializeMintInstruction(
+                mintKeypair.publicKey,
+                9,
+                wallet.publicKey,
+                null,
+                TOKEN_2022_PROGRAM_ID
+            ),
             createInitializeInstruction({
                 programId: TOKEN_2022_PROGRAM_ID,
                 mint: mintKeypair.publicKey,
@@ -49,24 +70,68 @@ if (!wallet.publicKey) {
                 uri: metadata.uri,
                 mintAuthority: wallet.publicKey,
                 updateAuthority: wallet.publicKey,
-            }),
+            })
         );
-            //pay transaction fees 
+
         transaction.feePayer = wallet.publicKey;
-        //recent blockhash required  
         transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
-//mintKeypair is a new account and must be signed here 
         transaction.partialSign(mintKeypair);
-//signing by wallet adapter 
-        await wallet.sendTransaction(transaction, connection);
+
+        const sig1 = await wallet.sendTransaction(transaction, connection);
+        await connection.confirmTransaction({ signature: sig1, ...(await connection.getLatestBlockhash()) });
+        console.log(`✅ Mint account created: https://explorer.solana.com/tx/${sig1}?cluster=devnet`);
+
+        // Create associated token account
+        const associatedToken = getAssociatedTokenAddressSync(
+            mintKeypair.publicKey,
+            wallet.publicKey,
+            false,
+            TOKEN_2022_PROGRAM_ID
+        );
+
+        const transaction2 = new Transaction().add(
+            createAssociatedTokenAccountInstruction(
+                wallet.publicKey,
+                associatedToken,
+                wallet.publicKey,
+                mintKeypair.publicKey,
+                TOKEN_2022_PROGRAM_ID
+            )
+        );
+
+        const sig2 = await wallet.sendTransaction(transaction2, connection);
+        await connection.confirmTransaction({ signature: sig2, ...(await connection.getLatestBlockhash()) });
+        console.log(`✅ Associated Token Account created: https://explorer.solana.com/tx/${sig2}?cluster=devnet`);
+
+        // Mint tokens to ATA
+        const transaction3 = new Transaction().add(
+            createMintToInstruction(
+                mintKeypair.publicKey,
+                associatedToken,
+                wallet.publicKey,
+                1000000000, // 1 token with 9 decimals
+                [],
+                TOKEN_2022_PROGRAM_ID
+            )
+        );
+
+        const sig3 = await wallet.sendTransaction(transaction3, connection);
+        await connection.confirmTransaction({ signature: sig3, ...(await connection.getLatestBlockhash()) });
+        console.log(`✅ Tokens minted: https://explorer.solana.com/tx/${sig3}?cluster=devnet`);
+
+        // Check balance to verify minting
+        const balance = await connection.getTokenAccountBalance(associatedToken);
+        console.log(`💰 Token Balance in wallet: ${balance.value.uiAmountString}`);
     }
 
-    return <div className="h-screen flex justify-center items-center flex-col">
-        <h1>Solana Token Launchpad</h1>
-        <input className='inputText' type='text' placeholder='Name'></input> <br />
-        <input className='inputText' type='text' placeholder='Symbol'></input> <br />
-        <input className='inputText' type='text' placeholder='Image URL'></input> <br />
-        <input className='inputText' type='text' placeholder='Initial Supply'></input> <br />
-        <button onClick={createToken} className='btn'>Create a token</button>
-    </div>
+    return (
+        <div className="h-32 flex justify-center items-center flex-col pb-4">
+            <h1>Solana Token Launchpad</h1>
+            <input className='inputText' type='text' placeholder='Name' /><br />
+            <input className='inputText' type='text' placeholder='Symbol' /><br />
+            <input className='inputText' type='text' placeholder='Image URL' /><br />
+            <input className='inputText' type='text' placeholder='Initial Supply' /><br />
+            <button onClick={createToken} className='btn'>Create a token</button>
+        </div>
+    );
 }
